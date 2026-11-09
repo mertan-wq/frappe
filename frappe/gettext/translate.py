@@ -1,9 +1,11 @@
 import csv
 import multiprocessing
 import os
+import re
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from string import Formatter
 
 from babel.messages.catalog import Catalog
 from babel.messages.extract import DEFAULT_KEYWORDS, extract_from_dir
@@ -275,9 +277,59 @@ def _compile_translation(app, locale, force=False, verbose=True):
 	with open(po_path, "rb") as f:
 		catalog = read_po(f)
 
+	skipped = 0
+	for message in catalog:
+		if not isinstance(message.id, str) or not message.id or not message.string:
+			continue
+		# labels and descriptions from JSON files are shown as they are, never formatted
+		if message.locations and all(path.endswith(".json") for path, _ in message.locations):
+			continue
+		if not translation_fits_source(message.id, message.string):
+			message.flags.add("fuzzy")
+			skipped += 1
+
 	mo_path = write_binary(app, catalog, locale)
 	if verbose:
 		print(f"MO file created at {mo_path}")
+		if skipped:
+			print(f"Skipped {skipped} translations in {po_path} with placeholders their source does not have")
+
+
+def get_placeholders(text: str) -> set[str] | None:
+	"""Return the fields `text.format()` looks up, or None if `text` is not a valid format string."""
+	try:
+		names = [
+			re.split(r"[.\[]", field, maxsplit=1)[0]
+			for _, field, _, _ in Formatter().parse(text)
+			if field is not None
+		]
+	except ValueError:
+		return None
+
+	if "" in names and any(name.isdecimal() for name in names):
+		return None
+
+	auto_number = iter(range(len(names)))
+	names = [str(int(name)) if name.isdecimal() else name or str(next(auto_number)) for name in names]
+	if not all(name.isdecimal() or name.isidentifier() for name in names):
+		return None
+
+	return set(names)
+
+
+def translation_fits_source(source: str, translation: str) -> bool:
+	"""False if `translation` uses a placeholder that `source` does not have, or has broken braces.
+
+	Code formats the translation with the source's arguments, so such a translation raises
+	in Python and shows the raw placeholder in JS. A source that is not a format string
+	always fits.
+	"""
+	source_placeholders = get_placeholders(source)
+	if source_placeholders is None:
+		return True
+
+	translation_placeholders = get_placeholders(translation)
+	return translation_placeholders is not None and translation_placeholders <= source_placeholders
 
 
 def update_po(target_app: str | None = None, locale: str | None = None):

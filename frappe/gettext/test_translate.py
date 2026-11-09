@@ -7,12 +7,14 @@ from babel.messages.pofile import read_po, write_po
 
 import frappe
 from frappe.gettext.translate import (
+	_compile_translation,
 	generate_pot,
 	get_is_gitignored_function_for_app,
 	get_method_map,
 	get_mo_path,
 	get_po_path,
 	get_pot_path,
+	get_translations_from_mo,
 	migrate,
 	new_catalog,
 	new_po,
@@ -179,3 +181,35 @@ class TestTranslate(IntegrationTestCase):
 		self.assertNotIn("test_translate_test_gitignore", get_pot_path("frappe").read_text())
 
 		self.assertTrue(get_is_gitignored_function_for_app(None)("frappe/public/dist"))
+
+	def test_compile_skips_translations_with_unknown_placeholders(self):
+		self.addCleanup(get_po_path("frappe", "test").unlink, missing_ok=True)
+		self.addCleanup(get_mo_path("frappe", "test").unlink, missing_ok=True)
+
+		kept = {
+			"Row {0}: {1}": "Zeile {0}: {1}",
+			"App {} is not installed": "App {0} ist nicht installiert",
+			"Rename {0}": "Umbenennen",
+			'Example: {"status": "open"}': 'Beispiel: {"status": "open"}',
+		}
+		skipped = {
+			"Please set a default Holiday List for Company {0}": "Bitte Standard-Feiertagsliste für Firma {1} festlegen",
+			"You cancelled this document": "{0} hat dieses Dokument storniert",
+			'"{0}" is not a valid URL': '"0}" ist keine gültige URL',
+			"Asset {} {asset_link} created for {}": "Vermögenswert {} {assets_link} für {} erstellt",
+		}
+		kept_from_json = {"Use {total_score} for the score": "Verwenden Sie {punktzahl} für die Bewertung"}
+		catalog = new_catalog("frappe", "test")
+		for source, translation in (kept | skipped).items():
+			catalog.add(source, translation, locations=[("frappe/utils/data.py", 1)])
+		for source, translation in kept_from_json.items():
+			catalog.add(source, translation, locations=[("frappe/core/doctype/user/user.json", 1)])
+		write_catalog("frappe", catalog, "test")
+
+		_compile_translation("frappe", "test", force=True, verbose=False)
+		translations = get_translations_from_mo("test", "frappe")
+
+		for source, translation in (kept | kept_from_json).items():
+			self.assertEqual(translations.get(source), translation)
+		for source in skipped:
+			self.assertNotIn(source, translations)
